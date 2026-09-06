@@ -91,6 +91,7 @@ useEffect(() => {
             </p>
 
             <div className="flex flex-wrap gap-4 mt-9">
+              <a href = "room-test" >
               <button
                 onClick={() => {
                   // TODO: create room
@@ -99,6 +100,7 @@ useEffect(() => {
               >
                 PLAY GAME →
               </button>
+              </a>
 
             
             </div>
@@ -170,37 +172,13 @@ useEffect(() => {
         className="relative z-10 border-t border-white/5 px-6 py-24"
       >
         <div className="max-w-xl mx-auto text-center">
-          <p className="text-xs uppercase tracking-[0.3em] text-white/30">
-            Have a room code?
-          </p>
+          
 
-          <h2 className="text-3xl font-bold mt-3">
-            Join your friend
-          </h2>
+          
 
-          <p className="text-white/40 mt-3">
-            Enter the code shared by your opponent.
-          </p>
+          
 
-          <div className="flex gap-3 mt-8">
-            <input
-              value={roomCode}
-              onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-              maxLength={6}
-              placeholder="A7K9X2"
-              className="flex-1 h-14 px-5 rounded-2xl bg-white/[0.04] border border-white/10 outline-none focus:border-white/30 transition text-center tracking-[0.3em] font-bold"
-            />
-
-            <button
-              onClick={() => {
-                // TODO: join room with socket
-                console.log("Joining:", roomCode);
-              }}
-              className="px-6 rounded-2xl bg-white text-black font-bold hover:bg-white/90 transition"
-            >
-              Join
-            </button>
-          </div>
+          
         </div>
       </section>
 
