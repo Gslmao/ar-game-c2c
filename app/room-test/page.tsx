@@ -61,7 +61,6 @@ export default function RoomTest() {
     const onMatchFound = ({ code: matchedCode }: MatchFoundPayload) => {
       setCode(matchedCode);
       setStatus("matched");
-      setIsRef(false);
     };
 
     const onOpponentLeft = () => {
@@ -142,7 +141,7 @@ export default function RoomTest() {
 
   const navigateToRoom = () => {
     if (status === "matched" && code) {
-      router.push(`/room/${encodeURIComponent(code)}?ref=${isRef}`);
+      router.push(`/room/${encodeURIComponent(code)}?role=${isRef ? 'host' : 'guest'}`);
     }
   };
 
