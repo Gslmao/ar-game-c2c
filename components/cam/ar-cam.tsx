@@ -401,6 +401,32 @@ export default function ARScene({
     const scale = new THREE.Vector3();
     reticle.matrix.decompose(position, quaternion, scale);
 
+    let outPosition = { x: position.x, y: position.y, z: position.z };
+    let outQuaternion = { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
+
+    if (!isHostRef.current) {
+      const transform = calibrationTransformRef.current;
+      if (!transform) {
+        console.warn("Cannot place object: guest has not calibrated yet.");
+        return;
+      }
+
+      // reticle.matrix is already a THREE.Matrix4 in column-major order,
+      // which matches what a flat Matrix4Array expects.
+      const poseMatrix = reticle.matrix.toArray();
+
+      const transformedMatrix = applyTransformToPose(poseMatrix, transform);
+
+      const transformedThreeMatrix = new THREE.Matrix4().fromArray(transformedMatrix);
+      const outPos = new THREE.Vector3();
+      const outQuat = new THREE.Quaternion();
+      const outScale = new THREE.Vector3();
+      transformedThreeMatrix.decompose(outPos, outQuat, outScale);
+
+      outPosition = { x: outPos.x, y: outPos.y, z: outPos.z };
+      outQuaternion = { x: outQuat.x, y: outQuat.y, z: outQuat.z, w: outQuat.w };
+    }
+
     const objectId =
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
@@ -408,23 +434,11 @@ export default function ARScene({
 
     socket.emit(
       "place-object",
-      {
-        code: roomCode,
-        objectId,
-        position: { x: position.x, y: position.y, z: position.z },
-        quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
-      },
+      { code: roomCode, objectId, position: outPosition, quaternion: outQuaternion },
       (response: { ok?: boolean; error?: string }) => {
-        if (response?.error) {
-          console.error("place-object failed:", response.error);
-        }
+        if (response?.error) console.error("place-object failed:", response.error);
       }
     );
-
-    // No mesh is added here. io.to(code) on the server includes the
-    // sender, so this device's own "object-placed" broadcast comes
-    // back to it too — the listener above is the only place a cube
-    // gets created, for local or remote taps alike.
   };
 
   const onSelect = () => {
