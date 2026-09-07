@@ -2,7 +2,6 @@
 import { useEffect, useState } from "react";
 
 export default function Home() {
-  const [roomCode, setRoomCode] = useState("");
   const [pixelWave, setPixelWave] = useState(true);
 
   useEffect(() => {

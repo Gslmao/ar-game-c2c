@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { SineWaveMesh } from "@/components/sine-wave-mesh";
 
 export default function Home() {
-  const [roomCode, setRoomCode] = useState("");
   const [pixelWave, setPixelWave] = useState(true);
 
 useEffect(() => {
