@@ -274,7 +274,12 @@ export default function RoomTest() {
                   <div className="font-semibold text-white tracking-wide">
                     {statusLabel}
                   </div>
-                  <div className="text-xs text-white/60">
+                  <div className="text-xs text-white/60" onClick={() => {
+                    if (status === "matched") {
+                      navigateToRoom();
+                    }
+                    return;
+                  }}>
                     {status === "waiting-for-opponent"
                       ? "Share the code below with your opponent to connect."
                       : status === "matched"
