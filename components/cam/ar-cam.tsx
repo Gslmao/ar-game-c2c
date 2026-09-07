@@ -3,49 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-// ---- Minimal WebXR type shims (only what this component uses) ----
-// Only needed if your project doesn't already have @types/webxr or a
-// global webxr.d.ts. If it does, these are structurally compatible.
-declare global {
-  interface Navigator {
-    xr?: XRSystem;
-  }
-}
 
-interface XRSystem {
-  isSessionSupported(mode: string): Promise<boolean>;
-  requestSession(mode: string, options?: XRSessionInit): Promise<XRSession>;
-}
-
-interface XRSessionInit {
-  requiredFeatures?: string[];
-  optionalFeatures?: string[];
-  domOverlay?: { root: Element };
-}
-
-interface XRSession extends EventTarget {
-  requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
-  requestHitTestSource?(options: { space: XRReferenceSpace }): Promise<XRHitTestSource>;
-  end(): Promise<void>;
-}
-
-interface XRReferenceSpace extends EventTarget {}
-
-interface XRHitTestSource {}
-
-interface XRHitTestResult {
-  getPose(baseSpace: XRReferenceSpace): XRPose | undefined;
-}
-
-interface XRPose {
-  transform: { matrix: Float32Array };
-}
-
-interface XRFrame {
-  session: XRSession;
-  getHitTestResults(source: XRHitTestSource): XRHitTestResult[];
-}
-// ---------------------------------------------------------------
 
 export default function ARScene() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -275,8 +233,6 @@ export default function ARScene() {
       session.addEventListener("end", onSessionEnd);
       session.addEventListener("select", onSelect);
 
-      // @ts-expect-error three's WebXRManager typings expect the DOM lib's
-      // XRSession; our local shim is structurally compatible at runtime.
       await renderer.xr.setSession(session);
 
       hitTestSourceRequestedRef.current = false;
