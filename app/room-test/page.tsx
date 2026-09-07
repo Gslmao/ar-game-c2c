@@ -263,25 +263,6 @@ export default function RoomTest() {
                 <div className="flex items-center justify-between">
                   <div className="w-10 h-10 rounded-xl bg-white/[0.05] border border-white/10 flex items-center justify-center text-white/80">
                     <KeyRound className="size-5" />
-                <div className="space-y-0.5 min-w-0 flex-1">
-                  <div className="font-semibold text-white tracking-wide">
-                    {statusLabel}
-                  </div>
-                  <div className="text-xs text-white/60" onClick={() => {
-                    if (status === "matched") {
-                      navigateToRoom();
-                    }
-                    return;
-                  }}>
-                    {status === "waiting-for-opponent"
-                      ? "Share the code below with your opponent to connect."
-                      : status === "matched"
-                        ? "Opponent connected! Match ready."
-                        : status === "opponent-left"
-                          ? "Your opponent has disconnected."
-                          : connected
-                            ? "Connected to matchmaking server."
-                            : "Connecting to server..."}
                   </div>
                   <span className="text-[10px] font-mono font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border border-white/10 bg-white/[0.03] text-white/50">
                     JOIN
