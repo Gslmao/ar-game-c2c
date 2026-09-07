@@ -2,62 +2,57 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import type { Socket } from "socket.io-client";
 import type { Point2D } from "@/lib/calibration";
 
-// The project uses only this small subset of WebXR, so these local types keep
-// the component usable when the browser's WebXR declarations are unavailable.
-declare global {
-  interface Navigator {
-    xr?: XRSystem;
-  }
+interface Vec3Data {
+  x: number;
+  y: number;
+  z: number;
 }
 
-interface XRSystem {
-  isSessionSupported(mode: string): Promise<boolean>;
-  requestSession(mode: string, options?: XRSessionInit): Promise<XRSession>;
+interface QuatData {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
 }
 
-interface XRSessionInit {
-  requiredFeatures?: string[];
-  optionalFeatures?: string[];
-  domOverlay?: { root: Element };
+// Matches the server's object-placed / room.objects shape from
+// socket-handlers.js — kept as plain data (not THREE types) since
+// this crosses the network boundary.
+export interface PlacedObjectPayload {
+  objectId: string;
+  position: Vec3Data;
+  quaternion: QuatData;
+  placedBy: "host" | "guest";
+  placedAt: number;
 }
 
-interface XRSession extends EventTarget {
-  requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
-  requestHitTestSource?(options: { space: XRReferenceSpace }): Promise<XRHitTestSource>;
-  end(): Promise<void>;
-}
-
-interface XRReferenceSpace extends EventTarget {}
-
-interface XRHitTestSource {}
-
-interface XRHitTestResult {
-  getPose(baseSpace: XRReferenceSpace): XRPose | undefined;
-}
-
-interface XRPose {
-  transform: { matrix: Float32Array };
-}
-
-interface XRFrame {
-  session: XRSession;
-  getHitTestResults(source: XRHitTestSource): XRHitTestResult[];
-}
 interface ARSceneProps {
-  // Three points let the downstream transform calculation detect disagreement.
+  // How many tapped points make up one calibration pass. 3 gives the
+  // downstream computeTransform() a discrepancy check to run (2 points
+  // is mathematically sufficient for rotation+translation, 3 isn't).
   calibrationRequiredPoints?: number;
-  // Called immediately after each calibration tap.
   onCalibrationPointCaptured?: (point: Point2D, index: number) => void;
-  // Called after the requested calibration point count is reached.
   onCalibrationComplete?: (points: Point2D[]) => void;
+  // Socket + room are optional so this component still works
+  // standalone (as it always has). Without them, tap-to-place just
+  // warns and does nothing — it never falls back to placing a local
+  // unsynced cube, since that would silently reintroduce the
+  // optimistic-local-state bug the multiplayer design avoids.
+  socket?: Socket | null;
+  roomCode?: string;
+  initialObjects?: PlacedObjectPayload[];
 }
 
 export default function ARScene({
-  calibrationRequiredPoints = 3,
+  calibrationRequiredPoints = 4,
   onCalibrationPointCaptured,
   onCalibrationComplete,
+  socket = null,
+  roomCode,
+  initialObjects,
 }: ARSceneProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -75,8 +70,10 @@ export default function ARScene({
   const [sessionActive, setSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Event listeners read refs so they always see current calibration values;
-  // state exists separately to trigger the visible UI updates.
+  // ---- Calibration state ----
+  // Refs carry the values onSelect actually reads (it's registered
+  // once via addEventListener and would otherwise close over stale
+  // state). The useState pair below exists purely to drive the UI.
   const calibrationActiveRef = useRef(false);
   const calibrationPointsRef = useRef<Point2D[]>([]);
   const calibrationMarkersRef = useRef<THREE.Mesh[]>([]);
@@ -86,6 +83,22 @@ export default function ARScene({
 
   const [calibrationActive, setCalibrationActive] = useState(false);
   const [calibrationCount, setCalibrationCount] = useState(0);
+
+  // ---- Placement state ----
+  // Same closure-staleness reasoning as calibration: onSelect is
+  // registered once, so socket/roomCode must be read from refs.
+  const socketRef = useRef<Socket | null>(socket);
+  const roomCodeRef = useRef<string | undefined>(roomCode);
+  // objectId -> mesh, so a later "object-removed" can find and dispose it.
+  const placedObjectsRef = useRef<Map<string, THREE.Mesh>>(new Map());
+
+  useEffect(() => {
+    socketRef.current = socket;
+  }, [socket]);
+
+  useEffect(() => {
+    roomCodeRef.current = roomCode;
+  }, [roomCode]);
 
   useEffect(() => {
     calibrationRequiredRef.current = calibrationRequiredPoints;
@@ -99,8 +112,7 @@ export default function ARScene({
     onCalibrationCompleteRef.current = onCalibrationComplete;
   }, [onCalibrationComplete]);
 
-  // Capability detection is separate from session startup so the UI can show
-  // an accurate device/browser state before asking for camera permissions.
+  // Check WebXR AR support once on mount
   useEffect(() => {
     if (typeof navigator === "undefined" || !navigator.xr) {
       setSupported(false);
@@ -115,14 +127,9 @@ export default function ARScene({
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // The scene is transparent because the XR camera supplies the real-world
-    // background. The perspective camera is still required by Three.js for
-    // rendering virtual geometry into the camera view.
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-    // Hemisphere light gives placed meshes readable top and bottom shading
-    // without requiring a manually positioned key light in AR space.
     const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
 
     light.position.set(0.5, 1, 0.25);
@@ -136,15 +143,10 @@ export default function ARScene({
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
 
-    // This enables Three.js' WebXR render loop and lets setSession() bind the
-    // browser XRSession to the renderer's camera and framebuffer.
     renderer.xr.enabled = true;
 
     containerRef.current.appendChild(renderer.domElement);
 
-    // The reticle is a horizontal ring placed on the detected real-world
-    // surface. XR hit-test poses are matrices, so matrixAutoUpdate is disabled
-    // and the pose matrix is copied directly on every XR frame.
     const geometry = new THREE.RingGeometry(0.06, 0.08, 32).rotateX(-Math.PI / 2);
 
     const material = new THREE.MeshBasicMaterial({
@@ -174,8 +176,8 @@ export default function ARScene({
     return () => {
       window.removeEventListener("resize", onResize);
 
-      // End the session and stop the frame loop before disposing Three.js
-      // resources; otherwise XR callbacks could access released objects.
+      // End any in-flight XR session so it doesn't keep running
+      // after the component unmounts.
       sessionRef.current?.end();
 
       renderer.setAnimationLoop(null);
@@ -189,11 +191,99 @@ export default function ARScene({
       }
       calibrationMarkersRef.current = [];
 
+      for (const mesh of placedObjectsRef.current.values()) {
+        mesh.geometry.dispose();
+        (mesh.material as THREE.Material).dispose();
+      }
+      placedObjectsRef.current.clear();
+
       renderer.dispose();
 
       renderer.domElement.remove();
     };
   }, []);
+
+  // Creates (or replaces) the mesh for a placed object. Color-coded by
+  // who placed it purely so you can visually confirm during testing
+  // which device's tap produced which cube.
+  const addRemoteObject = (
+    objectId: string,
+    record: Omit<PlacedObjectPayload, "objectId">
+  ) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    const existing = placedObjectsRef.current.get(objectId);
+    if (existing) {
+      scene.remove(existing);
+      existing.geometry.dispose();
+      (existing.material as THREE.Material).dispose();
+    }
+
+    const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+    const material = new THREE.MeshStandardMaterial({
+      color: record.placedBy === "host" ? 0xff5533 : 0x3388ff,
+    });
+    const cube = new THREE.Mesh(geometry, material);
+
+    cube.position.set(record.position.x, record.position.y, record.position.z);
+    cube.quaternion.set(
+      record.quaternion.x,
+      record.quaternion.y,
+      record.quaternion.z,
+      record.quaternion.w
+    );
+
+    scene.add(cube);
+    placedObjectsRef.current.set(objectId, cube);
+  };
+
+  const removeRemoteObject = (objectId: string) => {
+    const scene = sceneRef.current;
+    const mesh = placedObjectsRef.current.get(objectId);
+    if (!scene || !mesh) return;
+
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+    placedObjectsRef.current.delete(objectId);
+  };
+
+  // Hydrate objects that existed in the room before this component
+  // mounted. Runs after the scene-setup effect above (declared later
+  // in the file → runs after on mount), so sceneRef.current is set.
+  useEffect(() => {
+    if (!initialObjects || initialObjects.length === 0) return;
+    for (const obj of initialObjects) {
+      addRemoteObject(obj.objectId, obj);
+    }
+    // Intentionally only keyed on the array identity from the parent
+    // (join-room ack) — this is a one-time hydration, not a sync loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialObjects]);
+
+  // Everything placed *after* mount arrives here. This is the only
+  // place a placed-object mesh gets created for a live placement —
+  // there is no optimistic local copy made at tap time.
+  useEffect(() => {
+    if (!socket) return;
+
+    const onObjectPlaced = (payload: PlacedObjectPayload) => {
+      addRemoteObject(payload.objectId, payload);
+    };
+
+    const onObjectRemoved = ({ objectId }: { objectId: string }) => {
+      removeRemoteObject(objectId);
+    };
+
+    socket.on("object-placed", onObjectPlaced);
+    socket.on("object-removed", onObjectRemoved);
+
+    return () => {
+      socket.off("object-placed", onObjectPlaced);
+      socket.off("object-removed", onObjectRemoved);
+    };
+  }, [socket]);
 
   const clearCalibrationMarkers = () => {
     const scene = sceneRef.current;
@@ -229,15 +319,16 @@ export default function ARScene({
     const scale = new THREE.Vector3();
     reticle.matrix.decompose(position, quaternion, scale);
 
-    // Calibration is fitted on the floor plane, so Three.js world coordinates
-    // are reduced to x/z and the camera-space height is intentionally ignored.
+    // The calibration math is 2D (x, z) — floor-plane only. Height is
+    // dropped deliberately; every calibration tap is assumed to land
+    // on the same floor plane, so y carries no signal for the fit.
     const point: Point2D = { x: position.x, z: position.z };
     const index = calibrationPointsRef.current.length;
 
     calibrationPointsRef.current = [...calibrationPointsRef.current, point];
 
-    // Markers remain in the same Three.js scene as the reticle, giving users a
-    // persistent visual record of points already included in calibration.
+    // Visual marker, distinct from the orange placement cubes, so the
+    // person can see what they've tapped so far.
     const markerGeometry = new THREE.SphereGeometry(0.03, 16, 16);
     const markerMaterial = new THREE.MeshStandardMaterial({ color: 0x33cc66 });
     const marker = new THREE.Mesh(markerGeometry, markerMaterial);
@@ -255,6 +346,46 @@ export default function ARScene({
     }
   };
 
+  const placeObjectAtReticle = (reticle: THREE.Mesh) => {
+    const socket = socketRef.current;
+    const roomCode = roomCodeRef.current;
+
+    if (!socket || !roomCode) {
+      console.warn("Cannot place object: not connected to a room.");
+      return;
+    }
+
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    reticle.matrix.decompose(position, quaternion, scale);
+
+    const objectId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    socket.emit(
+      "place-object",
+      {
+        code: roomCode,
+        objectId,
+        position: { x: position.x, y: position.y, z: position.z },
+        quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
+      },
+      (response: { ok?: boolean; error?: string }) => {
+        if (response?.error) {
+          console.error("place-object failed:", response.error);
+        }
+      }
+    );
+
+    // No mesh is added here. io.to(code) on the server includes the
+    // sender, so this device's own "object-placed" broadcast comes
+    // back to it too — the listener above is the only place a cube
+    // gets created, for local or remote taps alike.
+  };
+
   const onSelect = () => {
     const scene = sceneRef.current;
     const reticle = reticleRef.current;
@@ -268,24 +399,7 @@ export default function ARScene({
       return;
     }
 
-    // Decompose the reticle's world matrix before enabling automatic updates;
-    // this converts the XR hit pose into ordinary Three.js transform fields
-    // that remain stable after the reticle moves to the next hit surface.
-    const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xff5533,
-    });
-
-    const cube = new THREE.Mesh(geometry, material);
-
-    cube.matrix.copy(reticle.matrix);
-
-    cube.matrix.decompose(cube.position, cube.quaternion, cube.scale);
-
-    cube.matrixAutoUpdate = true;
-
-    scene.add(cube);
+    placeObjectAtReticle(reticle);
   };
 
   const onSessionEnd = () => {
@@ -296,8 +410,6 @@ export default function ARScene({
       session.removeEventListener("select", onSelect);
     }
 
-    // Clearing the animation loop is essential: Three.js otherwise keeps
-    // requesting XR frames after the session has ended.
     rendererRef.current?.setAnimationLoop(null);
 
     hitTestSourceRequestedRef.current = false;
@@ -327,9 +439,6 @@ export default function ARScene({
 
     const session = frame.session;
 
-    // Request the viewer hit-test source and floor reference space once per
-    // session. The viewer space follows the device camera; local-floor gives
-    // returned poses a stable floor-relative coordinate system for placement.
     if (!hitTestSourceRequestedRef.current) {
       session
         .requestReferenceSpace("viewer")
@@ -360,9 +469,6 @@ export default function ARScene({
         const pose = hit.getPose(localSpace);
 
         if (pose) {
-          // WebXR returns a 4x4 pose matrix in column-major order. Three.js'
-          // fromArray understands that layout and preserves the hit's world
-          // position and orientation for the reticle and future placements.
           reticle.visible = true;
           reticle.matrix.fromArray(pose.transform.matrix);
         }
@@ -407,8 +513,6 @@ export default function ARScene({
       session.addEventListener("end", onSessionEnd);
       session.addEventListener("select", onSelect);
 
-      // Three.js and the local WebXR shim describe the same runtime session
-      // with separate TypeScript declarations, so this boundary needs a cast.
       await renderer.xr.setSession(session);
 
       hitTestSourceRequestedRef.current = false;
