@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   CircleAlert,
@@ -38,10 +39,12 @@ type Status =
 
 export default function RoomTest() {
   const { socket, connected } = useSocket();
-
+  const router = useRouter();
+  const [count, setCount] = useState(0);
   const [code, setCode] = useState("");
   const [joinInput, setJoinInput] = useState("");
   const [status, setStatus] = useState<Status>("idle");
+  const [isRef, setIsRef] = useState<boolean>(false);
 
   useEffect(() => {
     if (!socket) return;
@@ -50,11 +53,13 @@ export default function RoomTest() {
       setCode(data.code);
       console.log("Room created with code:", data.code);
       setStatus("waiting-for-opponent");
+      setIsRef(true);
     };
 
     const onMatchFound = ({ code: matchedCode }: MatchFoundPayload) => {
       setCode(matchedCode);
       setStatus("matched");
+      setIsRef(false);
     };
 
     const onOpponentLeft = () => {
@@ -65,6 +70,11 @@ export default function RoomTest() {
     socket.on("match-found", onMatchFound);
     socket.on("opponent-left", onOpponentLeft);
 
+    socket.on("server-message", (message : {message: string, sentAt: number}) => {
+      console.log("Server message:", message);
+      setCount(message.sentAt);
+    });
+
     return () => {
       socket.off("room-created", onRoomCreated);
       socket.off("match-found", onMatchFound);
@@ -72,6 +82,12 @@ export default function RoomTest() {
     };
   }, [socket]);
 
+  useEffect(() => {
+    if (status !== "idle"){
+      socket?.emit("start-message-interval", code);
+    }
+  }, [socket, code, status])
+  
   const createRoom = () => {
     socket?.emit("create-room", (response: RoomResponse) => {
       if (response.error) {
@@ -79,6 +95,14 @@ export default function RoomTest() {
       }
     });
   };
+
+  const stopMsg = () => {
+    socket?.emit("stop-message-interval", (response: RoomResponse) => {
+      if (response.error) {
+        setStatus(`error: ${response.error}`);
+      }
+    });
+  }
 
   const joinRoom = () => {
     const roomCode = joinInput.trim();
@@ -110,6 +134,12 @@ export default function RoomTest() {
     }
   };
 
+  const navigateToRoom = () => {
+    if (status === "matched" && code) {
+      router.push(`/room/${encodeURIComponent(code)}?ref=${isRef}`);
+    }
+  };
+
   const statusLabel =
     status === "idle"
       ? "Ready to play"
@@ -125,6 +155,9 @@ export default function RoomTest() {
 
   return (
     <main className="flex min-h-screen items-center justify-center p-4">
+      <Button onClick={stopMsg} variant="destructive" className="absolute top-4 right-4">
+        number: {count}
+      </Button>
       <Card className="w-full max-w-md">
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -153,7 +186,23 @@ export default function RoomTest() {
         </CardHeader>
 
         <CardContent className="space-y-4">
-          <Alert variant={isError ? "destructive" : "default"}>
+          <Alert
+            variant={isError ? "destructive" : "default"}
+            role={status === "matched" ? "button" : "alert"}
+            tabIndex={status === "matched" ? 0 : undefined}
+            className={status === "matched" ? "cursor-pointer" : undefined}
+            onClick={status === "matched" ? navigateToRoom : undefined}
+            onKeyDown={
+              status === "matched"
+                ? (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      navigateToRoom();
+                    }
+                  }
+                : undefined
+            }
+          >
             {isError ? (
               <CircleAlert className="size-4" />
             ) : status === "waiting-for-opponent" ? (
