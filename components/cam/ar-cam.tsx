@@ -2,52 +2,58 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import type { Socket } from "socket.io-client";
+import type { Point2D } from "@/lib/calibration";
 
-// ---- Minimal WebXR type shims (only what this component uses) ----
-// Only needed if your project doesn't already have @types/webxr or a
-// global webxr.d.ts. If it does, these are structurally compatible.
-declare global {
-  interface Navigator {
-    xr?: XRSystem;
-  }
+interface Vec3Data {
+  x: number;
+  y: number;
+  z: number;
 }
 
-interface XRSystem {
-  isSessionSupported(mode: string): Promise<boolean>;
-  requestSession(mode: string, options?: XRSessionInit): Promise<XRSession>;
+interface QuatData {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
 }
 
-interface XRSessionInit {
-  requiredFeatures?: string[];
-  optionalFeatures?: string[];
-  domOverlay?: { root: Element };
+// Matches the server's object-placed / room.objects shape from
+// socket-handlers.js — kept as plain data (not THREE types) since
+// this crosses the network boundary.
+export interface PlacedObjectPayload {
+  objectId: string;
+  position: Vec3Data;
+  quaternion: QuatData;
+  placedBy: "host" | "guest";
+  placedAt: number;
 }
 
-interface XRSession extends EventTarget {
-  requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
-  requestHitTestSource?(options: { space: XRReferenceSpace }): Promise<XRHitTestSource>;
-  end(): Promise<void>;
+interface ARSceneProps {
+  // How many tapped points make up one calibration pass. 3 gives the
+  // downstream computeTransform() a discrepancy check to run (2 points
+  // is mathematically sufficient for rotation+translation, 3 isn't).
+  calibrationRequiredPoints?: number;
+  onCalibrationPointCaptured?: (point: Point2D, index: number) => void;
+  onCalibrationComplete?: (points: Point2D[]) => void;
+  // Socket + room are optional so this component still works
+  // standalone (as it always has). Without them, tap-to-place just
+  // warns and does nothing — it never falls back to placing a local
+  // unsynced cube, since that would silently reintroduce the
+  // optimistic-local-state bug the multiplayer design avoids.
+  socket?: Socket | null;
+  roomCode?: string;
+  initialObjects?: PlacedObjectPayload[];
 }
 
-interface XRReferenceSpace extends EventTarget {}
-
-interface XRHitTestSource {}
-
-interface XRHitTestResult {
-  getPose(baseSpace: XRReferenceSpace): XRPose | undefined;
-}
-
-interface XRPose {
-  transform: { matrix: Float32Array };
-}
-
-interface XRFrame {
-  session: XRSession;
-  getHitTestResults(source: XRHitTestSource): XRHitTestResult[];
-}
-// ---------------------------------------------------------------
-
-export default function ARScene() {
+export default function ARScene({
+  calibrationRequiredPoints = 4,
+  onCalibrationPointCaptured,
+  onCalibrationComplete,
+  socket = null,
+  roomCode,
+  initialObjects,
+}: ARSceneProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -63,6 +69,48 @@ export default function ARScene() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ---- Calibration state ----
+  // Refs carry the values onSelect actually reads (it's registered
+  // once via addEventListener and would otherwise close over stale
+  // state). The useState pair below exists purely to drive the UI.
+  const calibrationActiveRef = useRef(false);
+  const calibrationPointsRef = useRef<Point2D[]>([]);
+  const calibrationMarkersRef = useRef<THREE.Mesh[]>([]);
+  const calibrationRequiredRef = useRef(calibrationRequiredPoints);
+  const onCalibrationPointCapturedRef = useRef(onCalibrationPointCaptured);
+  const onCalibrationCompleteRef = useRef(onCalibrationComplete);
+
+  const [calibrationActive, setCalibrationActive] = useState(false);
+  const [calibrationCount, setCalibrationCount] = useState(0);
+
+  // ---- Placement state ----
+  // Same closure-staleness reasoning as calibration: onSelect is
+  // registered once, so socket/roomCode must be read from refs.
+  const socketRef = useRef<Socket | null>(socket);
+  const roomCodeRef = useRef<string | undefined>(roomCode);
+  // objectId -> mesh, so a later "object-removed" can find and dispose it.
+  const placedObjectsRef = useRef<Map<string, THREE.Mesh>>(new Map());
+
+  useEffect(() => {
+    socketRef.current = socket;
+  }, [socket]);
+
+  useEffect(() => {
+    roomCodeRef.current = roomCode;
+  }, [roomCode]);
+
+  useEffect(() => {
+    calibrationRequiredRef.current = calibrationRequiredPoints;
+  }, [calibrationRequiredPoints]);
+
+  useEffect(() => {
+    onCalibrationPointCapturedRef.current = onCalibrationPointCaptured;
+  }, [onCalibrationPointCaptured]);
+
+  useEffect(() => {
+    onCalibrationCompleteRef.current = onCalibrationComplete;
+  }, [onCalibrationComplete]);
 
   // Check WebXR AR support once on mount
   useEffect(() => {
@@ -136,11 +184,207 @@ export default function ARScene() {
 
       geometry.dispose();
       material.dispose();
+
+      for (const marker of calibrationMarkersRef.current) {
+        marker.geometry.dispose();
+        (marker.material as THREE.Material).dispose();
+      }
+      calibrationMarkersRef.current = [];
+
+      for (const mesh of placedObjectsRef.current.values()) {
+        mesh.geometry.dispose();
+        (mesh.material as THREE.Material).dispose();
+      }
+      placedObjectsRef.current.clear();
+
       renderer.dispose();
 
       renderer.domElement.remove();
     };
   }, []);
+
+  // Creates (or replaces) the mesh for a placed object. Color-coded by
+  // who placed it purely so you can visually confirm during testing
+  // which device's tap produced which cube.
+  const addRemoteObject = (
+    objectId: string,
+    record: Omit<PlacedObjectPayload, "objectId">
+  ) => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    const existing = placedObjectsRef.current.get(objectId);
+    if (existing) {
+      scene.remove(existing);
+      existing.geometry.dispose();
+      (existing.material as THREE.Material).dispose();
+    }
+
+    const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+    const material = new THREE.MeshStandardMaterial({
+      color: record.placedBy === "host" ? 0xff5533 : 0x3388ff,
+    });
+    const cube = new THREE.Mesh(geometry, material);
+
+    cube.position.set(record.position.x, record.position.y, record.position.z);
+    cube.quaternion.set(
+      record.quaternion.x,
+      record.quaternion.y,
+      record.quaternion.z,
+      record.quaternion.w
+    );
+
+    scene.add(cube);
+    placedObjectsRef.current.set(objectId, cube);
+  };
+
+  const removeRemoteObject = (objectId: string) => {
+    const scene = sceneRef.current;
+    const mesh = placedObjectsRef.current.get(objectId);
+    if (!scene || !mesh) return;
+
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+    placedObjectsRef.current.delete(objectId);
+  };
+
+  // Hydrate objects that existed in the room before this component
+  // mounted. Runs after the scene-setup effect above (declared later
+  // in the file → runs after on mount), so sceneRef.current is set.
+  useEffect(() => {
+    if (!initialObjects || initialObjects.length === 0) return;
+    for (const obj of initialObjects) {
+      addRemoteObject(obj.objectId, obj);
+    }
+    // Intentionally only keyed on the array identity from the parent
+    // (join-room ack) — this is a one-time hydration, not a sync loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialObjects]);
+
+  // Everything placed *after* mount arrives here. This is the only
+  // place a placed-object mesh gets created for a live placement —
+  // there is no optimistic local copy made at tap time.
+  useEffect(() => {
+    if (!socket) return;
+
+    const onObjectPlaced = (payload: PlacedObjectPayload) => {
+      addRemoteObject(payload.objectId, payload);
+    };
+
+    const onObjectRemoved = ({ objectId }: { objectId: string }) => {
+      removeRemoteObject(objectId);
+    };
+
+    socket.on("object-placed", onObjectPlaced);
+    socket.on("object-removed", onObjectRemoved);
+
+    return () => {
+      socket.off("object-placed", onObjectPlaced);
+      socket.off("object-removed", onObjectRemoved);
+    };
+  }, [socket]);
+
+  const clearCalibrationMarkers = () => {
+    const scene = sceneRef.current;
+    if (scene) {
+      for (const marker of calibrationMarkersRef.current) {
+        scene.remove(marker);
+        marker.geometry.dispose();
+        (marker.material as THREE.Material).dispose();
+      }
+    }
+    calibrationMarkersRef.current = [];
+  };
+
+  const startCalibration = () => {
+    clearCalibrationMarkers();
+    calibrationPointsRef.current = [];
+    calibrationActiveRef.current = true;
+    setCalibrationActive(true);
+    setCalibrationCount(0);
+  };
+
+  const cancelCalibration = () => {
+    calibrationActiveRef.current = false;
+    calibrationPointsRef.current = [];
+    clearCalibrationMarkers();
+    setCalibrationActive(false);
+    setCalibrationCount(0);
+  };
+
+  const captureCalibrationPoint = (scene: THREE.Scene, reticle: THREE.Mesh) => {
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    reticle.matrix.decompose(position, quaternion, scale);
+
+    // The calibration math is 2D (x, z) — floor-plane only. Height is
+    // dropped deliberately; every calibration tap is assumed to land
+    // on the same floor plane, so y carries no signal for the fit.
+    const point: Point2D = { x: position.x, z: position.z };
+    const index = calibrationPointsRef.current.length;
+
+    calibrationPointsRef.current = [...calibrationPointsRef.current, point];
+
+    // Visual marker, distinct from the orange placement cubes, so the
+    // person can see what they've tapped so far.
+    const markerGeometry = new THREE.SphereGeometry(0.03, 16, 16);
+    const markerMaterial = new THREE.MeshStandardMaterial({ color: 0x33cc66 });
+    const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+    marker.position.copy(position);
+    scene.add(marker);
+    calibrationMarkersRef.current.push(marker);
+
+    setCalibrationCount(calibrationPointsRef.current.length);
+    onCalibrationPointCapturedRef.current?.(point, index);
+
+    if (calibrationPointsRef.current.length >= calibrationRequiredRef.current) {
+      calibrationActiveRef.current = false;
+      setCalibrationActive(false);
+      onCalibrationCompleteRef.current?.(calibrationPointsRef.current);
+    }
+  };
+
+  const placeObjectAtReticle = (reticle: THREE.Mesh) => {
+    const socket = socketRef.current;
+    const roomCode = roomCodeRef.current;
+
+    if (!socket || !roomCode) {
+      console.warn("Cannot place object: not connected to a room.");
+      return;
+    }
+
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    reticle.matrix.decompose(position, quaternion, scale);
+
+    const objectId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    socket.emit(
+      "place-object",
+      {
+        code: roomCode,
+        objectId,
+        position: { x: position.x, y: position.y, z: position.z },
+        quaternion: { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w },
+      },
+      (response: { ok?: boolean; error?: string }) => {
+        if (response?.error) {
+          console.error("place-object failed:", response.error);
+        }
+      }
+    );
+
+    // No mesh is added here. io.to(code) on the server includes the
+    // sender, so this device's own "object-placed" broadcast comes
+    // back to it too — the listener above is the only place a cube
+    // gets created, for local or remote taps alike.
+  };
 
   const onSelect = () => {
     const scene = sceneRef.current;
@@ -150,21 +394,12 @@ export default function ARScene() {
       return;
     }
 
-    const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+    if (calibrationActiveRef.current) {
+      captureCalibrationPoint(scene, reticle);
+      return;
+    }
 
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xff5533,
-    });
-
-    const cube = new THREE.Mesh(geometry, material);
-
-    cube.matrix.copy(reticle.matrix);
-
-    cube.matrix.decompose(cube.position, cube.quaternion, cube.scale);
-
-    cube.matrixAutoUpdate = true;
-
-    scene.add(cube);
+    placeObjectAtReticle(reticle);
   };
 
   const onSessionEnd = () => {
@@ -185,6 +420,9 @@ export default function ARScene() {
     if (reticleRef.current) {
       reticleRef.current.visible = false;
     }
+
+    calibrationActiveRef.current = false;
+    setCalibrationActive(false);
 
     setSessionActive(false);
   };
@@ -275,8 +513,6 @@ export default function ARScene() {
       session.addEventListener("end", onSessionEnd);
       session.addEventListener("select", onSelect);
 
-      // @ts-expect-error three's WebXRManager typings expect the DOM lib's
-      // XRSession; our local shim is structurally compatible at runtime.
       await renderer.xr.setSession(session);
 
       hitTestSourceRequestedRef.current = false;
@@ -322,12 +558,36 @@ export default function ARScene() {
       )}
 
       {sessionActive && (
-        <button
-          onClick={stopAR}
-          className="fixed right-3 top-3 z-10 rounded-lg bg-black/55 px-3.5 py-2 text-sm text-white"
-        >
-          Exit AR
-        </button>
+        <>
+          <button
+            onClick={stopAR}
+            className="fixed right-3 top-3 z-10 rounded-lg bg-black/55 px-3.5 py-2 text-sm text-white"
+          >
+            Exit AR
+          </button>
+
+          {calibrationActive ? (
+            <div className="fixed left-1/2 top-3 z-10 -translate-x-1/2 rounded-lg bg-black/70 px-4 py-2 text-center text-sm text-white">
+              <p>
+                Tap point {Math.min(calibrationCount + 1, calibrationRequiredPoints)} of{" "}
+                {calibrationRequiredPoints}
+              </p>
+              <button
+                onClick={cancelCalibration}
+                className="mt-1 text-xs text-red-300 underline"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={startCalibration}
+              className="fixed left-3 top-3 z-10 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm text-white"
+            >
+              {calibrationCount > 0 ? `Recalibrate (${calibrationCount} pts)` : "Calibrate"}
+            </button>
+          )}
+        </>
       )}
     </div>
   );
