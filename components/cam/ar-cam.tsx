@@ -95,6 +95,14 @@ export default function ARScene({
   const isHostRef = useRef(isHost);
 
   useEffect(() => {
+    isHostRef.current = isHost;
+    console.log(`[AR][${isHost ? "HOST" : "GUEST"}] role updated`, {
+      roomCode,
+      isHost,
+    });
+  }, [isHost, roomCode]);
+
+  useEffect(() => {
     if (isHost) return; // host does nothing here
     if (calibrationTransformRef.current) return; // already computed, don't redo on every render
 
@@ -111,6 +119,14 @@ export default function ARScene({
     const transform = computeTransform(myPoints, hostPoints);
     const discrepancy = maxPairwiseDistanceDiscrepancy(myPoints, hostPoints);
 
+    console.warn("[AR][GUEST] calibration inputs", {
+      guestPoints: myPoints,
+      hostPoints,
+      requiredPoints: required,
+      discrepancy,
+      transform,
+    });
+
     const DISCREPANCY_THRESHOLD = 0.05; // meters — tune once you see real numbers
     if (discrepancy > DISCREPANCY_THRESHOLD) {
       console.warn(
@@ -122,7 +138,10 @@ export default function ARScene({
     }
 
     calibrationTransformRef.current = transform;
-    console.log("Calibration transform computed, discrepancy:", discrepancy);
+    console.warn("[AR][GUEST] calibration transform accepted", {
+      discrepancy,
+      transform,
+    });
   }, [hostPoints, calibrationCount, isHost]);
 
   // ---- Placement state ----
@@ -310,6 +329,10 @@ export default function ARScene({
     if (!socket) return;
 
     const onObjectPlaced = (payload: PlacedObjectPayload) => {
+      console.warn(
+        `[AR][${payload.placedBy.toUpperCase()}] object-placed received`,
+        payload
+      );
       addRemoteObject(payload.objectId, payload);
     };
 
@@ -366,6 +389,16 @@ export default function ARScene({
     const point: Point2D = { x: position.x, z: position.z };
     const index = calibrationPointsRef.current.length;
 
+    console.warn(
+      `[AR][${isHostRef.current ? "HOST" : "GUEST"}] calibration point captured`,
+      {
+        index,
+        point,
+        total: index + 1,
+        required: calibrationRequiredRef.current,
+      }
+    );
+
     calibrationPointsRef.current = [...calibrationPointsRef.current, point];
 
     // Visual marker, distinct from the orange placement cubes, so the
@@ -404,10 +437,19 @@ export default function ARScene({
     let outPosition = { x: position.x, y: position.y, z: position.z };
     let outQuaternion = { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
 
+    const role = isHostRef.current ? "HOST" : "GUEST";
+
+    console.warn(`[AR][${role}] placement requested`, {
+      roomCode,
+      localPosition: outPosition,
+      localQuaternion: outQuaternion,
+      hasCalibrationTransform: Boolean(calibrationTransformRef.current),
+    });
+
     if (!isHostRef.current) {
       const transform = calibrationTransformRef.current;
       if (!transform) {
-        console.warn("Cannot place object: guest has not calibrated yet.");
+        console.warn("[AR][GUEST] placement blocked: no calibration transform");
         return;
       }
 
@@ -425,6 +467,19 @@ export default function ARScene({
 
       outPosition = { x: outPos.x, y: outPos.y, z: outPos.z };
       outQuaternion = { x: outQuat.x, y: outQuat.y, z: outQuat.z, w: outQuat.w };
+
+      console.warn("[AR][GUEST] transform applied to placement", {
+        transform,
+        localPosition: position,
+        localQuaternion: quaternion,
+        transformedPosition: outPosition,
+        transformedQuaternion: outQuaternion,
+      });
+    } else {
+      console.log("[AR][HOST] no coordinate transform applied", {
+        position: outPosition,
+        quaternion: outQuaternion,
+      });
     }
 
     const objectId =
@@ -432,11 +487,30 @@ export default function ARScene({
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+    console.warn(`[AR][${role}] emitting place-object`, {
+      objectId,
+      code: roomCode,
+      position: outPosition,
+      quaternion: outQuaternion,
+      transformed: !isHostRef.current,
+    });
+
     socket.emit(
       "place-object",
       { code: roomCode, objectId, position: outPosition, quaternion: outQuaternion },
       (response: { ok?: boolean; error?: string }) => {
-        if (response?.error) console.error("place-object failed:", response.error);
+        if (response?.error) {
+          console.error(`[AR][${role}] place-object rejected`, {
+            objectId,
+            error: response.error,
+          });
+          return;
+        }
+
+        console.warn(`[AR][${role}] place-object acknowledged`, {
+          objectId,
+          response,
+        });
       }
     );
   };

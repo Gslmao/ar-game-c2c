@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Socket } from "socket.io-client";
 import type { Point2D } from "@/lib/calibration";
 
@@ -19,6 +19,7 @@ interface UseCalibrationSyncResult {
   // a non-host client — computeTransform only ever runs on the guest,
   // so only the host should ever call this.
   sendHostPoints: (points: Point2D[]) => void;
+  acceptHostPoints: (points: Point2D[]) => void;
 }
 
 export function useCalibrationSync({
@@ -28,11 +29,21 @@ export function useCalibrationSync({
 }: UseCalibrationSyncArgs): UseCalibrationSyncResult {
   const [hostPoints, setHostPoints] = useState<Point2D[] | null>(null);
 
+  const acceptHostPoints = useCallback((points: Point2D[]) => {
+    console.warn("[CALIBRATION][GUEST] received host points", {
+      code,
+      pointCount: points.length,
+      points,
+      source: "join-room-ack",
+    });
+    setHostPoints(points);
+  }, [code]);
+
   useEffect(() => {
     if (!socket) return;
 
     const onHostCalibrationPoints = (payload: { points: Point2D[] }) => {
-      setHostPoints(payload.points);
+      acceptHostPoints(payload.points);
     };
 
     socket.on("host-calibration-points", onHostCalibrationPoints);
@@ -40,15 +51,21 @@ export function useCalibrationSync({
     return () => {
       socket.off("host-calibration-points", onHostCalibrationPoints);
     };
-  }, [socket]);
+  }, [acceptHostPoints, socket]);
 
   const sendHostPoints = (points: Point2D[]) => {
     if (!isRef) {
       console.warn("sendHostPoints called on a non-host client — ignored.");
       return;
     }
+
+    console.warn("[CALIBRATION][HOST] sending host points", {
+      code,
+      pointCount: points.length,
+      points,
+    });
     socket?.emit("host-calibration-points", { code, points });
   };
 
-  return { hostPoints, sendHostPoints };
+  return { hostPoints, sendHostPoints, acceptHostPoints };
 }
