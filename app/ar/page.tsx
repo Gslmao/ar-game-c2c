@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 // ARScene touches window/navigator, so it must never run on the server.
 const ARScene = dynamic(() => import("@/components/cam/ar-cam"), {
@@ -10,13 +10,12 @@ const ARScene = dynamic(() => import("@/components/cam/ar-cam"), {
 
 export default function ARTestPage() {
   const [showAR, setShowAR] = useState(false);
-  const [pageUrl, setPageUrl] = useState("");
-  const [isSecureContext, setIsSecureContext] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    setPageUrl(window.location.href);
-    setIsSecureContext(window.isSecureContext);
-  }, []);
+  const pageUrl =
+    typeof window !== "undefined" ? window.location.href : "";
+
+  const isSecureContext =
+    typeof window !== "undefined" ? window.isSecureContext : null;
 
   if (showAR) {
     return <ARScene />;
@@ -52,8 +51,8 @@ export default function ARTestPage() {
             {isSecureContext === null
               ? "checking…"
               : isSecureContext
-              ? "✅ yes"
-              : "❌ no — WebXR will refuse to start"}
+                ? "✅ yes"
+                : "❌ no — WebXR will refuse to start"}
           </p>
           <p>
             navigator.xr:{" "}
