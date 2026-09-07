@@ -222,3 +222,18 @@ export function applyTransformToPose(pose: Matrix4Array, transform: Transform2D)
   const alignment = multiplyMatrices4(translationMatrix, rotation);
   return multiplyMatrices4(alignment, Array.from(pose));
 }
+
+/** Apply the inverse frame transform to a full pose matrix. */
+export function applyInverseTransformToPose(pose: Matrix4Array, transform: Transform2D): number[] {
+  const inverseRotation = makeRotationYMatrix4(-transform.theta);
+  const inverseTranslation = makeTranslationMatrix4(
+    -transform.translation.x,
+    0,
+    -transform.translation.z
+  );
+  const inverseAlignment = multiplyMatrices4(
+    inverseRotation,
+    inverseTranslation
+  );
+  return multiplyMatrices4(inverseAlignment, Array.from(pose));
+}
