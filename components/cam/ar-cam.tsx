@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+
 import type { Socket } from "socket.io-client";
 import type { Point2D, Transform2D } from "@/lib/calibration";
 import {
