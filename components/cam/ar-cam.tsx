@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Socket } from "socket.io-client";
-import type { Point2D } from "@/lib/calibration";
+import type { Point2D, Transform2D } from "@/lib/calibration";
+import { computeTransform, applyTransformToPose, maxPairwiseDistanceDiscrepancy } from "@/lib/calibration";
 
 interface Vec3Data {
   x: number;
@@ -44,6 +45,8 @@ interface ARSceneProps {
   socket?: Socket | null;
   roomCode?: string;
   initialObjects?: PlacedObjectPayload[];
+  isHost?: boolean;          // from server-assigned socket.data.role, passed down by parent
+  hostPoints?: Point2D[] | null; // from useCalibrationSync's hostPoints, passed down by parent
 }
 
 export default function ARScene({
@@ -53,6 +56,8 @@ export default function ARScene({
   socket = null,
   roomCode,
   initialObjects,
+  isHost,
+  hostPoints
 }: ARSceneProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -70,6 +75,8 @@ export default function ARScene({
   const [sessionActive, setSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  
+
   // ---- Calibration state ----
   // Refs carry the values onSelect actually reads (it's registered
   // once via addEventListener and would otherwise close over stale
@@ -83,6 +90,40 @@ export default function ARScene({
 
   const [calibrationActive, setCalibrationActive] = useState(false);
   const [calibrationCount, setCalibrationCount] = useState(0);
+
+  const calibrationTransformRef = useRef<Transform2D | null>(null);
+  const isHostRef = useRef(isHost);
+
+  useEffect(() => {
+    if (isHost) return; // host does nothing here
+    if (calibrationTransformRef.current) return; // already computed, don't redo on every render
+
+    const myPoints = calibrationPointsRef.current;
+    const required = calibrationRequiredRef.current;
+
+    const myPointsReady = !calibrationActiveRef.current && myPoints.length >= required;
+    const hostPointsReady = hostPoints && hostPoints.length >= required;
+
+    if (!myPointsReady || !hostPointsReady) return;
+
+    // Guest's own points = source, host's points = target — guest maps
+    // into host's reference frame.
+    const transform = computeTransform(myPoints, hostPoints);
+    const discrepancy = maxPairwiseDistanceDiscrepancy(myPoints, hostPoints);
+
+    const DISCREPANCY_THRESHOLD = 0.05; // meters — tune once you see real numbers
+    if (discrepancy > DISCREPANCY_THRESHOLD) {
+      console.warn(
+        `Calibration discrepancy too high (${discrepancy.toFixed(3)}m). Recalibrate.`
+      );
+      // Don't store a bad transform — force a retry rather than silently
+      // placing objects in the wrong spot with false confidence.
+      return;
+    }
+
+    calibrationTransformRef.current = transform;
+    console.log("Calibration transform computed, discrepancy:", discrepancy);
+  }, [hostPoints, calibrationCount, isHost]);
 
   // ---- Placement state ----
   // Same closure-staleness reasoning as calibration: onSelect is
