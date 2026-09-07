@@ -18,7 +18,11 @@ export default function RoomPage({
 
   const isHost = searchParams.get("role") === "host";
 
-  const { hostPoints, sendHostPoints } = useCalibrationSync({ socket, code: roomCode, isRef: isHost });
+  const { hostPoints, sendHostPoints, acceptHostPoints } = useCalibrationSync({
+    socket,
+    code: roomCode,
+    isRef: isHost,
+  });
 
   const handleCalibrationComplete = (points: Point2D[]) => {
     if (isHost) sendHostPoints(points);
@@ -36,6 +40,54 @@ export default function RoomPage({
       mounted = false;
     };
   }, [params]);
+
+  useEffect(() => {
+    if (!socket || !roomCode) return;
+
+    const ensureRoomMembership = () => {
+      console.warn("[ROOM] ensuring socket is in room", {
+        code: roomCode,
+        role: isHost ? "HOST" : "GUEST",
+        socketId: socket.id,
+      });
+
+      socket.emit(
+        "join-room",
+        roomCode,
+        (response: {
+          code?: string;
+          error?: string;
+          calibrationPoints?: Point2D[];
+        }) => {
+          if (response?.error && response.error !== "Already in this room") {
+            console.error("[ROOM] failed to join room", {
+              code: roomCode,
+              role: isHost ? "HOST" : "GUEST",
+              error: response.error,
+            });
+            return;
+          }
+
+          if (!isHost && response.calibrationPoints?.length) {
+            acceptHostPoints(response.calibrationPoints);
+          }
+
+          console.warn("[ROOM] socket room membership confirmed", {
+            code: roomCode,
+            role: isHost ? "HOST" : "GUEST",
+            response,
+          });
+        }
+      );
+    };
+
+    if (socket.connected) ensureRoomMembership();
+    socket.on("connect", ensureRoomMembership);
+
+    return () => {
+      socket.off("connect", ensureRoomMembership);
+    };
+  }, [socket, roomCode, isHost, acceptHostPoints]);
 
   return (
     <ARScene

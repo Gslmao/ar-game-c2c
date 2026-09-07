@@ -4,7 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Socket } from "socket.io-client";
 import type { Point2D, Transform2D } from "@/lib/calibration";
-import { computeTransform, applyTransformToPose, maxPairwiseDistanceDiscrepancy } from "@/lib/calibration";
+import {
+  applyInverseTransformToPose,
+  applyTransformToPose,
+  computeTransform,
+  maxPairwiseDistanceDiscrepancy,
+} from "@/lib/calibration";
 
 interface Vec3Data {
   x: number;
@@ -93,10 +98,11 @@ export default function ARScene({
 
   const calibrationTransformRef = useRef<Transform2D | null>(null);
   const isHostRef = useRef(isHost);
+  const pendingObjectsRef = useRef<Map<string, PlacedObjectPayload>>(new Map());
 
   useEffect(() => {
     isHostRef.current = isHost;
-    console.log(`[AR][${isHost ? "HOST" : "GUEST"}] role updated`, {
+    console.warn(`[AR][${isHost ? "HOST" : "GUEST"}] role updated`, {
       roomCode,
       isHost,
     });
@@ -111,12 +117,23 @@ export default function ARScene({
 
     const myPointsReady = !calibrationActiveRef.current && myPoints.length >= required;
     const hostPointsReady = hostPoints && hostPoints.length >= required;
+    
+    console.warn("[AR][GUEST] calibration readiness", {
+      isHost,
+      calibrationActive: calibrationActiveRef.current,
+      guestPointCount: myPoints.length,
+      hostPointCount: hostPoints?.length ?? 0,
+      required,
+      hostPoints,
+    });
 
     if (!myPointsReady || !hostPointsReady) return;
 
-    // Guest's own points = source, host's points = target — guest maps
-    // into host's reference frame.
-    const transform = computeTransform(myPoints, hostPoints);
+    // computeTransform maps its second point set onto its first. The guest
+    // is the source frame and the host is the target frame, so calculate a
+    // guest-to-host transform here. Guest placements use it directly; host
+    // placements received by the guest use its inverse.
+    const transform = computeTransform(hostPoints, myPoints);
     const discrepancy = maxPairwiseDistanceDiscrepancy(myPoints, hostPoints);
 
     console.warn("[AR][GUEST] calibration inputs", {
@@ -127,7 +144,7 @@ export default function ARScene({
       transform,
     });
 
-    const DISCREPANCY_THRESHOLD = 0.05; // meters — tune once you see real numbers
+    const DISCREPANCY_THRESHOLD = 1.0; // meters — tune once you see real numbers
     if (discrepancy > DISCREPANCY_THRESHOLD) {
       console.warn(
         `Calibration discrepancy too high (${discrepancy.toFixed(3)}m). Recalibrate.`
@@ -187,6 +204,9 @@ export default function ARScene({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const placedObjects = placedObjectsRef.current;
+    const pendingObjects = pendingObjectsRef.current;
+
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
@@ -228,7 +248,9 @@ export default function ARScene({
     const onResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      if (!renderer.xr.isPresenting) {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
     };
 
     window.addEventListener("resize", onResize);
@@ -251,11 +273,12 @@ export default function ARScene({
       }
       calibrationMarkersRef.current = [];
 
-      for (const mesh of placedObjectsRef.current.values()) {
+      for (const mesh of placedObjects.values()) {
         mesh.geometry.dispose();
         (mesh.material as THREE.Material).dispose();
       }
-      placedObjectsRef.current.clear();
+      placedObjects.clear();
+      pendingObjects.clear();
 
       renderer.dispose();
 
@@ -273,6 +296,16 @@ export default function ARScene({
     const scene = sceneRef.current;
     if (!scene) return;
 
+    const transform = calibrationTransformRef.current;
+    if (!isHostRef.current && !transform) {
+      pendingObjectsRef.current.set(objectId, { objectId, ...record });
+      console.warn("[AR][GUEST] deferring object until calibration transform exists", {
+        objectId,
+        placedBy: record.placedBy,
+      });
+      return;
+    }
+
     const existing = placedObjectsRef.current.get(objectId);
     if (existing) {
       scene.remove(existing);
@@ -286,17 +319,50 @@ export default function ARScene({
     });
     const cube = new THREE.Mesh(geometry, material);
 
-    cube.position.set(record.position.x, record.position.y, record.position.z);
-    cube.quaternion.set(
-      record.quaternion.x,
-      record.quaternion.y,
-      record.quaternion.z,
-      record.quaternion.w
+    const pose = new THREE.Matrix4();
+    pose.compose(
+      new THREE.Vector3(record.position.x, record.position.y, record.position.z),
+      new THREE.Quaternion(
+        record.quaternion.x,
+        record.quaternion.y,
+        record.quaternion.z,
+        record.quaternion.w
+      ),
+      new THREE.Vector3(1, 1, 1)
     );
+
+    const localPose = !isHostRef.current && transform
+      ? applyInverseTransformToPose(pose.toArray(), transform)
+      : pose.toArray();
+    const localMatrix = new THREE.Matrix4().fromArray(localPose);
+    localMatrix.decompose(cube.position, cube.quaternion, cube.scale);
+
+    if (!isHostRef.current && transform) {
+      console.warn("[AR][GUEST] inverse transform applied to received object", {
+        objectId,
+        placedBy: record.placedBy,
+        hostPosition: record.position,
+        guestPosition: {
+          x: cube.position.x,
+          y: cube.position.y,
+          z: cube.position.z,
+        },
+        transform,
+      });
+    }
 
     scene.add(cube);
     placedObjectsRef.current.set(objectId, cube);
   };
+
+  useEffect(() => {
+    if (isHostRef.current || !calibrationTransformRef.current) return;
+
+    for (const [objectId, payload] of pendingObjectsRef.current) {
+      addRemoteObject(objectId, payload);
+    }
+    pendingObjectsRef.current.clear();
+  }, [hostPoints, calibrationCount]);
 
   const removeRemoteObject = (objectId: string) => {
     const scene = sceneRef.current;
@@ -319,7 +385,6 @@ export default function ARScene({
     }
     // Intentionally only keyed on the array identity from the parent
     // (join-room ack) — this is a one-time hydration, not a sync loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialObjects]);
 
   // Everything placed *after* mount arrives here. This is the only
@@ -476,7 +541,7 @@ export default function ARScene({
         transformedQuaternion: outQuaternion,
       });
     } else {
-      console.log("[AR][HOST] no coordinate transform applied", {
+      console.warn("[AR][HOST] no coordinate transform applied", {
         position: outPosition,
         quaternion: outQuaternion,
       });
@@ -556,13 +621,13 @@ export default function ARScene({
     setSessionActive(false);
   };
 
-  const onXRFrame = (timestamp: number, frame: XRFrame) => {
+  const onXRFrame = (timestamp: number, frame?: XRFrame) => {
     const renderer = rendererRef.current;
     const scene = sceneRef.current;
     const camera = cameraRef.current;
     const reticle = reticleRef.current;
 
-    if (!renderer || !scene || !camera || !reticle) {
+    if (!renderer || !scene || !camera || !reticle || !frame) {
       return;
     }
 
