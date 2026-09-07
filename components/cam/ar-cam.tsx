@@ -4,9 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Point2D } from "@/lib/calibration";
 
-// ---- Minimal WebXR type shims (only what this component uses) ----
-// Only needed if your project doesn't already have @types/webxr or a
-// global webxr.d.ts. If it does, these are structurally compatible.
+// The project uses only this small subset of WebXR, so these local types keep
+// the component usable when the browser's WebXR declarations are unavailable.
 declare global {
   interface Navigator {
     xr?: XRSystem;
@@ -46,18 +45,12 @@ interface XRFrame {
   session: XRSession;
   getHitTestResults(source: XRHitTestSource): XRHitTestResult[];
 }
-// ---------------------------------------------------------------
-
 interface ARSceneProps {
-  // How many tapped points make up one calibration pass. 3 gives the
-  // downstream computeTransform() a discrepancy check to run (2 points
-  // is mathematically sufficient for rotation+translation, 3 isn't).
+  // Three points let the downstream transform calculation detect disagreement.
   calibrationRequiredPoints?: number;
-  // Fires once per tap while calibrating — useful for sending each
-  // point over the socket as it's captured, rather than waiting for
-  // the whole batch.
+  // Called immediately after each calibration tap.
   onCalibrationPointCaptured?: (point: Point2D, index: number) => void;
-  // Fires once the required number of points has been tapped.
+  // Called after the requested calibration point count is reached.
   onCalibrationComplete?: (points: Point2D[]) => void;
 }
 
@@ -82,10 +75,8 @@ export default function ARScene({
   const [sessionActive, setSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ---- Calibration state ----
-  // Refs carry the values onSelect actually reads (it's registered
-  // once via addEventListener and would otherwise close over stale
-  // state). The useState pair below exists purely to drive the UI.
+  // Event listeners read refs so they always see current calibration values;
+  // state exists separately to trigger the visible UI updates.
   const calibrationActiveRef = useRef(false);
   const calibrationPointsRef = useRef<Point2D[]>([]);
   const calibrationMarkersRef = useRef<THREE.Mesh[]>([]);
@@ -108,7 +99,8 @@ export default function ARScene({
     onCalibrationCompleteRef.current = onCalibrationComplete;
   }, [onCalibrationComplete]);
 
-  // Check WebXR AR support once on mount
+  // Capability detection is separate from session startup so the UI can show
+  // an accurate device/browser state before asking for camera permissions.
   useEffect(() => {
     if (typeof navigator === "undefined" || !navigator.xr) {
       setSupported(false);
@@ -123,9 +115,14 @@ export default function ARScene({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // The scene is transparent because the XR camera supplies the real-world
+    // background. The perspective camera is still required by Three.js for
+    // rendering virtual geometry into the camera view.
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+    // Hemisphere light gives placed meshes readable top and bottom shading
+    // without requiring a manually positioned key light in AR space.
     const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
 
     light.position.set(0.5, 1, 0.25);
@@ -139,10 +136,15 @@ export default function ARScene({
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
 
+    // This enables Three.js' WebXR render loop and lets setSession() bind the
+    // browser XRSession to the renderer's camera and framebuffer.
     renderer.xr.enabled = true;
 
     containerRef.current.appendChild(renderer.domElement);
 
+    // The reticle is a horizontal ring placed on the detected real-world
+    // surface. XR hit-test poses are matrices, so matrixAutoUpdate is disabled
+    // and the pose matrix is copied directly on every XR frame.
     const geometry = new THREE.RingGeometry(0.06, 0.08, 32).rotateX(-Math.PI / 2);
 
     const material = new THREE.MeshBasicMaterial({
@@ -172,8 +174,8 @@ export default function ARScene({
     return () => {
       window.removeEventListener("resize", onResize);
 
-      // End any in-flight XR session so it doesn't keep running
-      // after the component unmounts.
+      // End the session and stop the frame loop before disposing Three.js
+      // resources; otherwise XR callbacks could access released objects.
       sessionRef.current?.end();
 
       renderer.setAnimationLoop(null);
@@ -227,16 +229,15 @@ export default function ARScene({
     const scale = new THREE.Vector3();
     reticle.matrix.decompose(position, quaternion, scale);
 
-    // The calibration math is 2D (x, z) — floor-plane only. Height is
-    // dropped deliberately; every calibration tap is assumed to land
-    // on the same floor plane, so y carries no signal for the fit.
+    // Calibration is fitted on the floor plane, so Three.js world coordinates
+    // are reduced to x/z and the camera-space height is intentionally ignored.
     const point: Point2D = { x: position.x, z: position.z };
     const index = calibrationPointsRef.current.length;
 
     calibrationPointsRef.current = [...calibrationPointsRef.current, point];
 
-    // Visual marker, distinct from the orange placement cubes, so the
-    // person can see what they've tapped so far.
+    // Markers remain in the same Three.js scene as the reticle, giving users a
+    // persistent visual record of points already included in calibration.
     const markerGeometry = new THREE.SphereGeometry(0.03, 16, 16);
     const markerMaterial = new THREE.MeshStandardMaterial({ color: 0x33cc66 });
     const marker = new THREE.Mesh(markerGeometry, markerMaterial);
@@ -267,6 +268,9 @@ export default function ARScene({
       return;
     }
 
+    // Decompose the reticle's world matrix before enabling automatic updates;
+    // this converts the XR hit pose into ordinary Three.js transform fields
+    // that remain stable after the reticle moves to the next hit surface.
     const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
 
     const material = new THREE.MeshStandardMaterial({
@@ -292,6 +296,8 @@ export default function ARScene({
       session.removeEventListener("select", onSelect);
     }
 
+    // Clearing the animation loop is essential: Three.js otherwise keeps
+    // requesting XR frames after the session has ended.
     rendererRef.current?.setAnimationLoop(null);
 
     hitTestSourceRequestedRef.current = false;
@@ -321,6 +327,9 @@ export default function ARScene({
 
     const session = frame.session;
 
+    // Request the viewer hit-test source and floor reference space once per
+    // session. The viewer space follows the device camera; local-floor gives
+    // returned poses a stable floor-relative coordinate system for placement.
     if (!hitTestSourceRequestedRef.current) {
       session
         .requestReferenceSpace("viewer")
@@ -351,6 +360,9 @@ export default function ARScene({
         const pose = hit.getPose(localSpace);
 
         if (pose) {
+          // WebXR returns a 4x4 pose matrix in column-major order. Three.js'
+          // fromArray understands that layout and preserves the hit's world
+          // position and orientation for the reticle and future placements.
           reticle.visible = true;
           reticle.matrix.fromArray(pose.transform.matrix);
         }
@@ -395,8 +407,8 @@ export default function ARScene({
       session.addEventListener("end", onSessionEnd);
       session.addEventListener("select", onSelect);
 
-      // @ts-expect-error three's WebXRManager typings expect the DOM lib's
-      // XRSession; our local shim is structurally compatible at runtime.
+      // Three.js and the local WebXR shim describe the same runtime session
+      // with separate TypeScript declarations, so this boundary needs a cast.
       await renderer.xr.setSession(session);
 
       hitTestSourceRequestedRef.current = false;
