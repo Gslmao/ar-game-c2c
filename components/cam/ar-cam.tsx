@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import type { Point2D } from "@/lib/calibration";
 
 // ---- Minimal WebXR type shims (only what this component uses) ----
 // Only needed if your project doesn't already have @types/webxr or a
@@ -47,7 +48,24 @@ interface XRFrame {
 }
 // ---------------------------------------------------------------
 
-export default function ARScene() {
+interface ARSceneProps {
+  // How many tapped points make up one calibration pass. 3 gives the
+  // downstream computeTransform() a discrepancy check to run (2 points
+  // is mathematically sufficient for rotation+translation, 3 isn't).
+  calibrationRequiredPoints?: number;
+  // Fires once per tap while calibrating — useful for sending each
+  // point over the socket as it's captured, rather than waiting for
+  // the whole batch.
+  onCalibrationPointCaptured?: (point: Point2D, index: number) => void;
+  // Fires once the required number of points has been tapped.
+  onCalibrationComplete?: (points: Point2D[]) => void;
+}
+
+export default function ARScene({
+  calibrationRequiredPoints = 3,
+  onCalibrationPointCaptured,
+  onCalibrationComplete,
+}: ARSceneProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -63,6 +81,32 @@ export default function ARScene() {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ---- Calibration state ----
+  // Refs carry the values onSelect actually reads (it's registered
+  // once via addEventListener and would otherwise close over stale
+  // state). The useState pair below exists purely to drive the UI.
+  const calibrationActiveRef = useRef(false);
+  const calibrationPointsRef = useRef<Point2D[]>([]);
+  const calibrationMarkersRef = useRef<THREE.Mesh[]>([]);
+  const calibrationRequiredRef = useRef(calibrationRequiredPoints);
+  const onCalibrationPointCapturedRef = useRef(onCalibrationPointCaptured);
+  const onCalibrationCompleteRef = useRef(onCalibrationComplete);
+
+  const [calibrationActive, setCalibrationActive] = useState(false);
+  const [calibrationCount, setCalibrationCount] = useState(0);
+
+  useEffect(() => {
+    calibrationRequiredRef.current = calibrationRequiredPoints;
+  }, [calibrationRequiredPoints]);
+
+  useEffect(() => {
+    onCalibrationPointCapturedRef.current = onCalibrationPointCaptured;
+  }, [onCalibrationPointCaptured]);
+
+  useEffect(() => {
+    onCalibrationCompleteRef.current = onCalibrationComplete;
+  }, [onCalibrationComplete]);
 
   // Check WebXR AR support once on mount
   useEffect(() => {
@@ -136,17 +180,90 @@ export default function ARScene() {
 
       geometry.dispose();
       material.dispose();
+
+      for (const marker of calibrationMarkersRef.current) {
+        marker.geometry.dispose();
+        (marker.material as THREE.Material).dispose();
+      }
+      calibrationMarkersRef.current = [];
+
       renderer.dispose();
 
       renderer.domElement.remove();
     };
   }, []);
 
+  const clearCalibrationMarkers = () => {
+    const scene = sceneRef.current;
+    if (scene) {
+      for (const marker of calibrationMarkersRef.current) {
+        scene.remove(marker);
+        marker.geometry.dispose();
+        (marker.material as THREE.Material).dispose();
+      }
+    }
+    calibrationMarkersRef.current = [];
+  };
+
+  const startCalibration = () => {
+    clearCalibrationMarkers();
+    calibrationPointsRef.current = [];
+    calibrationActiveRef.current = true;
+    setCalibrationActive(true);
+    setCalibrationCount(0);
+  };
+
+  const cancelCalibration = () => {
+    calibrationActiveRef.current = false;
+    calibrationPointsRef.current = [];
+    clearCalibrationMarkers();
+    setCalibrationActive(false);
+    setCalibrationCount(0);
+  };
+
+  const captureCalibrationPoint = (scene: THREE.Scene, reticle: THREE.Mesh) => {
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    reticle.matrix.decompose(position, quaternion, scale);
+
+    // The calibration math is 2D (x, z) — floor-plane only. Height is
+    // dropped deliberately; every calibration tap is assumed to land
+    // on the same floor plane, so y carries no signal for the fit.
+    const point: Point2D = { x: position.x, z: position.z };
+    const index = calibrationPointsRef.current.length;
+
+    calibrationPointsRef.current = [...calibrationPointsRef.current, point];
+
+    // Visual marker, distinct from the orange placement cubes, so the
+    // person can see what they've tapped so far.
+    const markerGeometry = new THREE.SphereGeometry(0.03, 16, 16);
+    const markerMaterial = new THREE.MeshStandardMaterial({ color: 0x33cc66 });
+    const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+    marker.position.copy(position);
+    scene.add(marker);
+    calibrationMarkersRef.current.push(marker);
+
+    setCalibrationCount(calibrationPointsRef.current.length);
+    onCalibrationPointCapturedRef.current?.(point, index);
+
+    if (calibrationPointsRef.current.length >= calibrationRequiredRef.current) {
+      calibrationActiveRef.current = false;
+      setCalibrationActive(false);
+      onCalibrationCompleteRef.current?.(calibrationPointsRef.current);
+    }
+  };
+
   const onSelect = () => {
     const scene = sceneRef.current;
     const reticle = reticleRef.current;
 
     if (!scene || !reticle || !reticle.visible) {
+      return;
+    }
+
+    if (calibrationActiveRef.current) {
+      captureCalibrationPoint(scene, reticle);
       return;
     }
 
@@ -185,6 +302,9 @@ export default function ARScene() {
     if (reticleRef.current) {
       reticleRef.current.visible = false;
     }
+
+    calibrationActiveRef.current = false;
+    setCalibrationActive(false);
 
     setSessionActive(false);
   };
@@ -322,12 +442,36 @@ export default function ARScene() {
       )}
 
       {sessionActive && (
-        <button
-          onClick={stopAR}
-          className="fixed right-3 top-3 z-10 rounded-lg bg-black/55 px-3.5 py-2 text-sm text-white"
-        >
-          Exit AR
-        </button>
+        <>
+          <button
+            onClick={stopAR}
+            className="fixed right-3 top-3 z-10 rounded-lg bg-black/55 px-3.5 py-2 text-sm text-white"
+          >
+            Exit AR
+          </button>
+
+          {calibrationActive ? (
+            <div className="fixed left-1/2 top-3 z-10 -translate-x-1/2 rounded-lg bg-black/70 px-4 py-2 text-center text-sm text-white">
+              <p>
+                Tap point {Math.min(calibrationCount + 1, calibrationRequiredPoints)} of{" "}
+                {calibrationRequiredPoints}
+              </p>
+              <button
+                onClick={cancelCalibration}
+                className="mt-1 text-xs text-red-300 underline"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={startCalibration}
+              className="fixed left-3 top-3 z-10 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm text-white"
+            >
+              {calibrationCount > 0 ? `Recalibrate (${calibrationCount} pts)` : "Calibrate"}
+            </button>
+          )}
+        </>
       )}
     </div>
   );
