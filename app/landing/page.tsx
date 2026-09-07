@@ -1,6 +1,7 @@
 
 "use client";
 import { useEffect, useState } from "react";
+import { SineWaveMesh } from "@/components/sine-wave-mesh";
 
 export default function Home() {
   const [roomCode, setRoomCode] = useState("");
@@ -14,7 +15,7 @@ useEffect(() => {
   return () => clearTimeout(timer);
 }, []);
   return (
-    <main className="min-h-screen bg-[#08090d] text-white overflow-hidden">
+    <main className="min-h-screen bg-[#08090d] text-white overflow-hidden relative">
       {/* Background */}
       {pixelWave && (
         <div className={pixelWave ? "ar-content scanning" : "ar-content"}>
@@ -26,28 +27,33 @@ useEffect(() => {
           <div className="ar-scan-line" />
         </div>
       )}
-      <div className="absolute inset-0 pointer-events-none">
+      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
         <div className="absolute top-[-20%] left-[20%] w-[500px] h-[500px] bg-purple-600/20 blur-[140px] rounded-full" />
         <div className="absolute bottom-[-20%] right-[10%] w-[450px] h-[450px] bg-blue-500/10 blur-[140px] rounded-full" />
 
-        <div
-          className="absolute inset-0 opacity-[0.04]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.5) 1px, transparent 1px)",
-            backgroundSize: "60px 60px",
-          }}
-        />
+        {/* Dynamic Sine-Wave Grid Mesh */}
+        <SineWaveMesh />
       </div>
 
       {/* Navbar */}
       <nav className="relative z-10 flex items-center justify-between px-8 py-6 max-w-7xl mx-auto">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-white text-black flex items-center justify-center font-black">
-            AR
+        <div className="flex items-center gap-3 group cursor-pointer">
+          {/* Enhanced AR Logo Badge */}
+          <div className="relative flex items-center justify-center">
+            {/* Ambient cyber glow */}
+            <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-500 to-cyan-400 opacity-70 blur-[6px] group-hover:opacity-100 group-hover:blur-[8px] transition duration-500" />
+
+            {/* Dark glass badge */}
+            <div className="relative w-9 h-9 rounded-xl bg-[#0e1017]/90 border border-white/20 backdrop-blur-xl flex items-center justify-center shadow-inner overflow-hidden transition-transform duration-300 group-hover:scale-105">
+              <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-transparent pointer-events-none" />
+              <span className="font-black text-xs tracking-wider bg-gradient-to-br from-white via-purple-100 to-cyan-300 bg-clip-text text-transparent drop-shadow-[0_0_8px_rgba(168,85,247,0.5)]">
+                AR
+              </span>
+            </div>
           </div>
 
-          <span className="font-bold tracking-tight text-lg">
+          {/* ARCADE text with load & hover spin animation */}
+          <span className="font-bold tracking-tight text-lg animate-arcade-spin cursor-pointer select-none">
             ARCADE
           </span>
         </div>
@@ -78,31 +84,24 @@ useEffect(() => {
               REAL-TIME AR MULTIPLAYER
             </div>
 
-            <div className="text-6xl flex flex-col items-center md:text-7xl font-black tracking-[-0.05em] leading-[0.95]">
+            <div className="text-6xl md:text-7xl font-black tracking-[-0.05em] leading-[0.95]">
               <div>
-                PLAY
-              <span className="text-white/40"> IN YOUR  </span>
+                PLAY <span className="text-white/40">IN YOUR</span>
               </div>
-              WORLD.
+              <div>WORLD.</div>
             </div>
 
-            <p className="mt-7 text-lg text-white/50 max-w-md leading-relaxed">
-              
-            </p>
-
-            <div className="flex flex-wrap gap-4 mt-9">
-              <a href = "room-test" >
-              <button
-                onClick={() => {
-                  // TODO: create room
-                }}
-                className="px-6 py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition"
-              >
-                PLAY GAME →
-              </button>
+            <div className="mt-7 flex flex-wrap gap-4">
+              <a href="room-test">
+                <button
+                  onClick={() => {
+                    // TODO: create room
+                  }}
+                  className="px-6 py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition cursor-pointer shadow-[0_0_30px_rgba(255,255,255,0.15)] hover:shadow-[0_0_35px_rgba(255,255,255,0.3)]"
+                >
+                  PLAY GAME →
+                </button>
               </a>
-
-            
             </div>
           </div>
 
@@ -172,13 +171,6 @@ useEffect(() => {
         className="relative z-10 border-t border-white/5 px-6 py-24"
       >
         <div className="max-w-xl mx-auto text-center">
-          
-
-          
-
-          
-
-          
         </div>
       </section>
 

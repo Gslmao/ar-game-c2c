@@ -527,3 +527,95 @@
     @apply font-sans;
   }
 }
+
+/* =========================================
+   ARCADE TEXT SPIN ANIMATION
+   ========================================= */
+
+@keyframes arcadeSpin {
+  0% {
+    transform: perspective(600px) rotateY(-360deg) scale(0.8);
+    opacity: 0;
+    filter: blur(4px);
+  }
+  50% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  75% {
+    transform: perspective(600px) rotateY(20deg) scale(1.06);
+  }
+  88% {
+    transform: perspective(600px) rotateY(-8deg) scale(0.98);
+  }
+  100% {
+    transform: perspective(600px) rotateY(0deg) scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+.animate-arcade-spin {
+  display: inline-block;
+  transform-style: preserve-3d;
+  animation: arcadeSpin 1.4s cubic-bezier(0.25, 1, 0.5, 1) 0.3s both;
+  transition: transform 0.3s ease;
+}
+
+.animate-arcade-spin:hover {
+  animation: arcadeSpinHover 0.8s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+@keyframes arcadeSpinHover {
+  0% {
+    transform: perspective(600px) rotateY(0deg);
+  }
+  100% {
+    transform: perspective(600px) rotateY(360deg);
+  }
+}
+
+/* =========================================
+   AMBIENT GLOW & ORB ANIMATIONS
+   ========================================= */
+
+@keyframes floatOrbOne {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(35px, -30px) scale(1.08);
+  }
+}
+
+@keyframes floatOrbTwo {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(-30px, 35px) scale(1.06);
+  }
+}
+
+@keyframes boxGlowPulse {
+  0%, 100% {
+    opacity: 0.65;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.92;
+    transform: scale(1.025);
+  }
+}
+
+.animate-orb-one {
+  animation: floatOrbOne 14s ease-in-out infinite;
+}
+
+.animate-orb-two {
+  animation: floatOrbTwo 16s ease-in-out infinite;
+}
+
+.animate-box-glow {
+  animation: boxGlowPulse 5s ease-in-out infinite;
+}
